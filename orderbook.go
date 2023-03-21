@@ -10,6 +10,8 @@ type Order struct {
 	count       uint32
 	orderId     uint32
 	executionId uint32
+	input       inputType
+	instrument  string
 }
 
 func (o *Order) printOrder() {
@@ -24,8 +26,8 @@ type Orderbook struct {
 	data   []*Order
 }
 
-func GetOrderbook(l LessFunction) Orderbook {
-	return Orderbook{lesser: l, data: make([]*Order, 0)}
+func GetOrderbook(l LessFunction) *Orderbook {
+	return &Orderbook{lesser: l, data: make([]*Order, 0)}
 }
 
 func (ob *Orderbook) Len() int { return len(ob.data) }
@@ -60,30 +62,36 @@ func (ob *Orderbook) Top() *Order {
 	return nil
 }
 
-func buyComparator(i, j int, data []*Order) bool {
-	firstOrder := data[i]
-	secondOrder := data[j]
-	if firstOrder.price == secondOrder.price {
-		return firstOrder.timestamp < secondOrder.timestamp
+func getBuyOrderbook() *Orderbook {
+	comp := func(i, j int, data []*Order) bool {
+		firstOrder := data[i]
+		secondOrder := data[j]
+		if firstOrder.price == secondOrder.price {
+			return firstOrder.timestamp < secondOrder.timestamp
+		}
+		return firstOrder.price > secondOrder.price
 	}
-	return firstOrder.price > secondOrder.price
+	return GetOrderbook(comp)
 }
 
-func sellComparator(i, j int, data []*Order) bool {
-	firstOrder := data[i]
-	secondOrder := data[j]
-	if firstOrder.price == secondOrder.price {
-		return firstOrder.timestamp < secondOrder.timestamp
+func getSellOrderbook() *Orderbook {
+	comp := func(i, j int, data []*Order) bool {
+		firstOrder := data[i]
+		secondOrder := data[j]
+		if firstOrder.price == secondOrder.price {
+			return firstOrder.timestamp < secondOrder.timestamp
+		}
+		return firstOrder.price < secondOrder.price
 	}
-	return firstOrder.price < secondOrder.price
+	return GetOrderbook(comp)
 }
 
 // uncomment to run the main since there can only be 1 main per package
 /*
 func main() { // run using go run orderbook.go
 	fmt.Println("====BUY ORDERBOOK=====")
-	q := GetOrderbook(buyComparator)
-	heap.Init(&q)
+	q := getBuyOrderbook()
+	heap.Init(q)
 	o0 := &Order{
 		price:     1,
 		timestamp: 1,
@@ -97,19 +105,19 @@ func main() { // run using go run orderbook.go
 		timestamp: 2,
 	}
 
-	heap.Push(&q, o0)
-	heap.Push(&q, o1)
-	heap.Push(&q, o2)
+	heap.Push(q, o0)
+	heap.Push(q, o1)
+	heap.Push(q, o2)
 	o2.count = 10 // attempt to modify the pointer
 
 	for q.Len() > 0 {
-		item := heap.Pop(&q).(*Order)
+		item := heap.Pop(q).(*Order)
 		item.printOrder()
 	}
 
 	fmt.Println("====SELL ORDERBOOK=====")
-	sq := GetOrderbook(sellComparator)
-	heap.Init(&sq)
+	sq := getSellOrderbook()
+	heap.Init(sq)
 	o3 := &Order{
 		price:     0,
 		timestamp: 1,
@@ -123,13 +131,13 @@ func main() { // run using go run orderbook.go
 		timestamp: 2,
 	}
 
-	heap.Push(&sq, o3)
-	heap.Push(&sq, o4)
-	heap.Push(&sq, o5)
+	heap.Push(sq, o3)
+	heap.Push(sq, o4)
+	heap.Push(sq, o5)
 	sq.Top().count = 100
 
 	for sq.Len() > 0 {
-		item := heap.Pop(&sq).(*Order)
+		item := heap.Pop(sq).(*Order)
 		item.printOrder()
 	}
 }

@@ -10,17 +10,56 @@ import (
 	"time"
 )
 
-type Engine struct{}
+const WorkerBufferSize = 100
+
+type Engine struct {
+	clientCh          chan Order
+	instrumentMapping map[string]chan<- Order
+}
+
+func getInitEngine(ctx context.Context) *Engine {
+	e := &Engine{
+		clientCh:          make(chan Order),
+		instrumentMapping: make(map[string]chan<- Order),
+	}
+
+	go e.createDistributor(ctx)
+	return e
+}
+func (e *Engine) createDistributor(ctx context.Context) {
+	for {
+		select {
+		case o := <-e.clientCh:
+			// get channel
+			ch := e.instrumentMapping[o.instrument]
+			if ch == nil {
+				instCh := make(chan Order, WorkerBufferSize)
+				e.instrumentMapping[o.instrument] = instCh
+
+				// create the worker per instrument
+				w := getWorker(instCh)
+				go w.work(ctx)
+
+				ch = instCh
+			}
+
+			ch <- o
+		case <-ctx.Done():
+			return
+		}
+	}
+}
 
 func (e *Engine) accept(ctx context.Context, conn net.Conn) {
 	go func() {
 		<-ctx.Done()
 		conn.Close()
 	}()
-	go handleConn(conn)
+	go handleConn(conn, e.clientCh)
 }
 
-func handleConn(conn net.Conn) {
+// client connection
+func handleConn(conn net.Conn, distributorCh chan Order) {
 	defer conn.Close()
 	for {
 		in, err := readInput(conn)
@@ -30,16 +69,27 @@ func handleConn(conn net.Conn) {
 			}
 			return
 		}
-		switch in.orderType {
-		case inputCancel:
-			fmt.Fprintf(os.Stderr, "Got cancel ID: %v\n", in.orderId)
-			outputOrderDeleted(in, true, GetCurrentTimestamp())
-		default:
-			fmt.Fprintf(os.Stderr, "Got order: %c %v x %v @ %v ID: %v\n",
-				in.orderType, in.instrument, in.count, in.price, in.orderId)
-			outputOrderAdded(in, GetCurrentTimestamp())
+		o := Order{
+			orderId:     in.orderId,
+			price:       in.price,
+			timestamp:   GetCurrentTimestamp(),
+			count:       in.count,
+			executionId: 0,
+			instrument:  in.instrument,
 		}
-		outputOrderExecuted(123, 124, 1, 2000, 10, GetCurrentTimestamp())
+		switch in.orderType {
+		case inputBuy:
+			o.input = inputBuy
+		case inputSell:
+			o.input = inputSell
+		case inputCancel:
+			o.input = inputCancel
+		}
+		distributorCh <- o
+		// TODO: Example of adding orders
+		// outputOrderAdded(in, GetCurrentTimestamp())
+		// outputOrderDeleted(in, true, GetCurrentTimestamp())
+		// outputOrderExecuted(123, 124, 1, 2000, 10, GetCurrentTimestamp())
 	}
 }
 
