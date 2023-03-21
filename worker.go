@@ -7,14 +7,16 @@ import (
 
 type Worker struct {
 	inputCh        <-chan Order
+	deletionCh     chan<- uint32
 	buyOrderbook   *Orderbook
 	sellOrderbook  *Orderbook
 	orderIdMapping map[uint32]*Order
 }
 
-func getWorker(inputCh <-chan Order) *Worker {
+func getWorker(inputCh <-chan Order, deletionCh chan<- uint32) *Worker {
 	return &Worker{
 		inputCh:        inputCh,
+		deletionCh:     deletionCh,
 		buyOrderbook:   getBuyOrderbook(),
 		sellOrderbook:  getSellOrderbook(),
 		orderIdMapping: make(map[uint32]*Order),
@@ -42,6 +44,7 @@ func (w *Worker) work(ctx context.Context) {
 }
 
 func (w *Worker) handleCancel(o Order) {
+	w.deletionCh <- o.orderId
 	if val, ok := w.orderIdMapping[o.orderId]; ok {
 		val.count = 0
 		outputOrderDeleted(o, true, GetCurrentTimestamp())
@@ -79,6 +82,7 @@ func (w *Worker) handleBuy(o Order) {
 
 			if topSellOrder.count == 0 {
 				delete(w.orderIdMapping, topSellOrder.orderId)
+				w.deletionCh <- topSellOrder.orderId
 				heap.Pop(w.sellOrderbook)
 			}
 		} else {
@@ -121,6 +125,7 @@ func (w *Worker) handleSell(o Order) {
 
 			if topBuyOrder.count == 0 {
 				delete(w.orderIdMapping, topBuyOrder.orderId)
+				w.deletionCh <- topBuyOrder.orderId
 				heap.Pop(w.buyOrderbook)
 			}
 		} else {

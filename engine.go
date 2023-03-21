@@ -14,6 +14,7 @@ const WorkerBufferSize = 100
 
 type Engine struct {
 	clientCh          chan Order
+	deletionCh        chan uint32
 	instrumentMapping map[string]chan<- Order
 	idMapping         map[uint32]string
 }
@@ -21,6 +22,7 @@ type Engine struct {
 func getInitEngine(ctx context.Context) *Engine {
 	e := &Engine{
 		clientCh:          make(chan Order),
+		deletionCh:        make(chan uint32, WorkerBufferSize),
 		instrumentMapping: make(map[string]chan<- Order),
 		idMapping:         make(map[uint32]string),
 	}
@@ -31,17 +33,23 @@ func getInitEngine(ctx context.Context) *Engine {
 func (e *Engine) createDistributor(ctx context.Context) {
 	for {
 		select {
+		case id := <-e.deletionCh:
+			delete(e.idMapping, id)
 		case o := <-e.clientCh:
 			if o.instrument == "" { // cancel order
 				if val, ok := e.idMapping[o.orderId]; ok {
 					o.instrument = val
 				} else {
-					// something is wrong, we are guaranteed that the order for cancellation is valid
-					o.printOrder()
+					outputOrderDeleted(o, false, GetCurrentTimestamp())
+					o.done <- struct{}{}
+					break
 				}
 			}
 
-			e.idMapping[o.orderId] = o.instrument
+			if o.input != inputCancel {
+				e.idMapping[o.orderId] = o.instrument
+			}
+
 			if val, ok := e.instrumentMapping[o.instrument]; !ok {
 				e.createWorkerAndSend(ctx, o)
 			} else {
@@ -58,7 +66,7 @@ func (e *Engine) createWorkerAndSend(ctx context.Context, o Order) {
 	e.instrumentMapping[o.instrument] = instCh
 
 	// create the worker per instrument
-	w := getWorker(instCh)
+	w := getWorker(instCh, e.deletionCh)
 	go w.work(ctx)
 	instCh <- o
 }
