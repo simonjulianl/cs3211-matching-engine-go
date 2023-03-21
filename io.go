@@ -77,22 +77,21 @@ func readInput(conn net.Conn) (in input, err error) {
 	return
 }
 
-func outputOrderDeleted(in input, accepted bool, outTime int64) {
+func outputOrderDeleted(o Order, accepted bool, outTime int64) {
 	acceptedTxt := "A"
 	if !accepted {
 		acceptedTxt = "R"
 	}
-	fmt.Printf("X %v %v %v\n",
-		in.orderId, acceptedTxt, outTime)
+	fmt.Printf("X %v %v %v\n", o.orderId, acceptedTxt, outTime)
 }
 
-func outputOrderAdded(in input, outTime int64) {
+func outputOrderAdded(o Order, outTime int64) {
 	orderType := "S"
-	if in.orderType == inputBuy {
+	if o.input == inputBuy {
 		orderType = "B"
 	}
 	fmt.Printf("%v %v %v %v %v %v\n",
-		orderType, in.orderId, in.instrument, in.price, in.count, outTime)
+		orderType, o.orderId, o.instrument, o.price, o.count, outTime)
 }
 
 func outputOrderExecuted(restingId, newId, execId, price, count uint32, outTime int64) {

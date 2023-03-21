@@ -30,20 +30,17 @@ func (e *Engine) createDistributor(ctx context.Context) {
 	for {
 		select {
 		case o := <-e.clientCh:
-			// get channel
-			ch := e.instrumentMapping[o.instrument]
-			if ch == nil {
+			if val, ok := e.instrumentMapping[o.instrument]; !ok {
 				instCh := make(chan Order, WorkerBufferSize)
 				e.instrumentMapping[o.instrument] = instCh
 
 				// create the worker per instrument
 				w := getWorker(instCh)
 				go w.work(ctx)
-
-				ch = instCh
+				instCh <- o
+			} else {
+				val <- o
 			}
-
-			ch <- o
 		case <-ctx.Done():
 			return
 		}
@@ -72,7 +69,6 @@ func handleConn(conn net.Conn, distributorCh chan Order) {
 		o := Order{
 			orderId:     in.orderId,
 			price:       in.price,
-			timestamp:   GetCurrentTimestamp(),
 			count:       in.count,
 			executionId: 0,
 			instrument:  in.instrument,
@@ -86,10 +82,6 @@ func handleConn(conn net.Conn, distributorCh chan Order) {
 			o.input = inputCancel
 		}
 		distributorCh <- o
-		// TODO: Example of adding orders
-		// outputOrderAdded(in, GetCurrentTimestamp())
-		// outputOrderDeleted(in, true, GetCurrentTimestamp())
-		// outputOrderExecuted(123, 124, 1, 2000, 10, GetCurrentTimestamp())
 	}
 }
 
