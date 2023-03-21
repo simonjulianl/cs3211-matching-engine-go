@@ -15,12 +15,14 @@ const WorkerBufferSize = 100
 type Engine struct {
 	clientCh          chan Order
 	instrumentMapping map[string]chan<- Order
+	idMapping         map[uint32]string
 }
 
 func getInitEngine(ctx context.Context) *Engine {
 	e := &Engine{
 		clientCh:          make(chan Order),
 		instrumentMapping: make(map[string]chan<- Order),
+		idMapping:         make(map[uint32]string),
 	}
 
 	go e.createDistributor(ctx)
@@ -30,14 +32,18 @@ func (e *Engine) createDistributor(ctx context.Context) {
 	for {
 		select {
 		case o := <-e.clientCh:
-			if val, ok := e.instrumentMapping[o.instrument]; !ok {
-				instCh := make(chan Order, WorkerBufferSize)
-				e.instrumentMapping[o.instrument] = instCh
+			if o.instrument == "" { // cancel order
+				if val, ok := e.idMapping[o.orderId]; ok {
+					o.instrument = val
+				} else {
+					// something is wrong, we are guaranteed that the order for cancellation is valid
+					o.printOrder()
+				}
+			}
 
-				// create the worker per instrument
-				w := getWorker(instCh)
-				go w.work(ctx)
-				instCh <- o
+			e.idMapping[o.orderId] = o.instrument
+			if val, ok := e.instrumentMapping[o.instrument]; !ok {
+				e.createWorkerAndSend(ctx, o)
 			} else {
 				val <- o
 			}
@@ -45,6 +51,16 @@ func (e *Engine) createDistributor(ctx context.Context) {
 			return
 		}
 	}
+}
+
+func (e *Engine) createWorkerAndSend(ctx context.Context, o Order) {
+	instCh := make(chan Order, WorkerBufferSize)
+	e.instrumentMapping[o.instrument] = instCh
+
+	// create the worker per instrument
+	w := getWorker(instCh)
+	go w.work(ctx)
+	instCh <- o
 }
 
 func (e *Engine) accept(ctx context.Context, conn net.Conn) {
@@ -58,6 +74,7 @@ func (e *Engine) accept(ctx context.Context, conn net.Conn) {
 // client connection
 func handleConn(conn net.Conn, distributorCh chan Order) {
 	defer conn.Close()
+	done := make(chan struct{})
 	for {
 		in, err := readInput(conn)
 		if err != nil {
@@ -72,6 +89,7 @@ func handleConn(conn net.Conn, distributorCh chan Order) {
 			count:       in.count,
 			executionId: 0,
 			instrument:  in.instrument,
+			done:        done,
 		}
 		switch in.orderType {
 		case inputBuy:
@@ -82,6 +100,7 @@ func handleConn(conn net.Conn, distributorCh chan Order) {
 			o.input = inputCancel
 		}
 		distributorCh <- o
+		<-done
 	}
 }
 

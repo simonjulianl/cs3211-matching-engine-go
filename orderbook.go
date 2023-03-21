@@ -12,6 +12,7 @@ type Order struct {
 	executionId uint32
 	input       inputType
 	instrument  string
+	done        chan<- struct{} // to mark that the current order has been processed and the client thread can send more orders
 }
 
 func (o *Order) printOrder() {

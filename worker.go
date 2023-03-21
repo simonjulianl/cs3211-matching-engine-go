@@ -34,6 +34,7 @@ func (w *Worker) work(ctx context.Context) {
 			default: // not recognized input type
 				o.printOrder()
 			}
+			o.done <- struct{}{}
 		case <-ctx.Done():
 			return
 		}
@@ -77,6 +78,7 @@ func (w *Worker) handleBuy(o Order) {
 			)
 
 			if topSellOrder.count == 0 {
+				delete(w.orderIdMapping, topSellOrder.orderId)
 				heap.Pop(w.sellOrderbook)
 			}
 		} else {
@@ -118,6 +120,7 @@ func (w *Worker) handleSell(o Order) {
 			)
 
 			if topBuyOrder.count == 0 {
+				delete(w.orderIdMapping, topBuyOrder.orderId)
 				heap.Pop(w.buyOrderbook)
 			}
 		} else {
