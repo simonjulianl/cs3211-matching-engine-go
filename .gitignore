@@ -4,3 +4,5 @@ client
 /.deps
 compile_commands.json
 .cache
+
+.idea
