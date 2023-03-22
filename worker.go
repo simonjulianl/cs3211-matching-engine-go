@@ -17,11 +17,11 @@ type Worker struct {
 }
 
 func initWorker(ctx context.Context, inputCh <-chan Order, deletionCh chan<- uint32) {
-	buyCh := make(chan Order)
+	buyCh := make(chan Order, WorkerBufferSize)
 	buyDone := make(chan struct{}, 1)
 	buyDone <- struct{}{}
 
-	sellCh := make(chan Order)
+	sellCh := make(chan Order, WorkerBufferSize)
 	sellDone := make(chan struct{}, 1)
 	sellDone <- struct{}{}
 
@@ -72,28 +72,32 @@ func (w *Worker) work(ctx context.Context) {
 			switch o.input {
 			case inputCancel:
 				/*
-					Realize that you cannot have concurrent delete and (buy/sell). This is because it is guaranteed that
-					the deletion comes from the same thread which must wait until the current order to be finished.
+					Realize that you cannot have concurrent delete and (buy/sell) for the same id.
+					This is because it is guaranteed that the deletion comes from the same thread
+					which must wait until the current order to be finished.
 				*/
 				w.handleCancel(o)
 			case inputBuy:
-				<-w.sellDone
+				select {
+				case <-w.sellDone:
+					w.currentSell = nil
+					w.sellDone <- struct{}{}
+				default:
+				}
 				<-w.buyDone // no one is buying
 				w.currentBuy = &o
 				w.handleSafeBuy(o)
-				<-w.buyDone // ensure that the processing is done
-				w.currentBuy = nil
-				w.buyDone <- struct{}{}
-				w.sellDone <- struct{}{}
 			case inputSell:
-				<-w.buyDone
+				select {
+				case <-w.buyDone:
+					w.currentBuy = nil
+					w.buyDone <- struct{}{}
+				default:
+				}
+
 				<-w.sellDone // no one in selling
 				w.currentSell = &o
 				w.handleSafeSell(o)
-				<-w.sellDone // ensure that the sell has been done
-				w.currentSell = nil
-				w.sellDone <- struct{}{}
-				w.buyDone <- struct{}{}
 			default: // not recognized input type
 				o.printOrder()
 			}
