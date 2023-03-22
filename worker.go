@@ -8,8 +8,10 @@ type Worker struct {
 	inputCh            <-chan Order
 	buyOutputCh        chan<- Order
 	buyDone            chan struct{}
+	currentBuy         *Order // buy worker handles sell order
 	sellOutputCh       chan<- Order
 	sellDone           chan struct{}
+	currentSell        *Order // sell worker handles buy order
 	deletionWorkerCh   <-chan uint32
 	orderIdTypeMapping map[uint32]inputType
 }
@@ -29,8 +31,10 @@ func initWorker(ctx context.Context, inputCh <-chan Order, deletionCh chan<- uin
 		inputCh:            inputCh,
 		buyOutputCh:        buyCh,
 		buyDone:            buyDone,
+		currentBuy:         nil,
 		sellOutputCh:       sellCh,
 		sellDone:           sellDone,
+		currentSell:        nil,
 		deletionWorkerCh:   deletionWorkerCh,
 		orderIdTypeMapping: make(map[uint32]inputType),
 	}
@@ -73,9 +77,23 @@ func (w *Worker) work(ctx context.Context) {
 				*/
 				w.handleCancel(o)
 			case inputBuy:
+				<-w.sellDone
+				<-w.buyDone // no one is buying
+				w.currentBuy = &o
 				w.handleSafeBuy(o)
+				<-w.buyDone // ensure that the processing is done
+				w.currentBuy = nil
+				w.buyDone <- struct{}{}
+				w.sellDone <- struct{}{}
 			case inputSell:
+				<-w.buyDone
+				<-w.sellDone // no one in selling
+				w.currentSell = &o
 				w.handleSafeSell(o)
+				<-w.sellDone // ensure that the sell has been done
+				w.currentSell = nil
+				w.sellDone <- struct{}{}
+				w.buyDone <- struct{}{}
 			default: // not recognized input type
 				o.printOrder()
 			}
@@ -83,22 +101,6 @@ func (w *Worker) work(ctx context.Context) {
 			return
 		}
 	}
-}
-
-func (w *Worker) handleSafeBuy(o Order) {
-	<-w.buyDone                                 // no one is buying
-	w.orderIdTypeMapping[o.orderId] = inputSell // buy order will be put in buy orderbook in sell worker
-	w.buyOutputCh <- o
-	<-w.buyDone // ensure that the processing is done
-	w.buyDone <- struct{}{}
-}
-
-func (w *Worker) handleSafeSell(o Order) {
-	<-w.sellDone                               // no one in selling
-	w.orderIdTypeMapping[o.orderId] = inputBuy // sell order will be put in sell orderbook in buy worker
-	w.sellOutputCh <- o
-	<-w.sellDone // ensure that the sell has been done
-	w.sellDone <- struct{}{}
 }
 
 func (w *Worker) handleCancel(o Order) {
@@ -115,6 +117,39 @@ func (w *Worker) handleCancel(o Order) {
 	} else { // already deleted, not in buy or sell anymore
 		outputOrderDeleted(o, false, GetCurrentTimestamp())
 		o.done <- struct{}{}
+	}
+}
+
+func (w *Worker) handleSafeBuy(o Order) {
+	w.orderIdTypeMapping[o.orderId] = inputSell // buy order will be put in buy orderbook in sell worker
+	if w.currentSell == nil {
+		// we can immediately send the order
+		w.buyOutputCh <- o
+	} else {
+		// the current sell is not nil, we need to check if we can
+		if isOrderMatching(o.price, w.currentSell.price) {
+			<-w.sellDone // wait until the sell is done
+			w.buyOutputCh <- o
+			w.sellDone <- struct{}{} // release the sell worker, allow it to work again
+		} else { // order not matching, no harm in sending directly
+			w.buyOutputCh <- o
+		}
+	}
+}
+func (w *Worker) handleSafeSell(o Order) {
+	w.orderIdTypeMapping[o.orderId] = inputBuy // sell order will be put in sell orderbook in buy worker
+	if w.currentBuy == nil {
+		// we can immediately send the order
+		w.sellOutputCh <- o
+	} else {
+		// the current sell is not nil, we need to check if we can
+		if isOrderMatching(w.currentBuy.price, o.price) {
+			<-w.buyDone // wait until the buy is done
+			w.sellOutputCh <- o
+			w.buyDone <- struct{}{} // release the buy worker, allow it to work again
+		} else { // order not matching, no harm in sending directly
+			w.sellOutputCh <- o
+		}
 	}
 }
 
