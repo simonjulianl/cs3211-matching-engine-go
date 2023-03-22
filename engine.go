@@ -66,8 +66,7 @@ func (e *Engine) createWorkerAndSend(ctx context.Context, o Order) {
 	e.instrumentMapping[o.instrument] = instCh
 
 	// create the worker per instrument
-	w := getWorker(instCh, e.deletionCh)
-	go w.work(ctx)
+	initWorker(ctx, instCh, e.deletionCh)
 	instCh <- o
 }
 
@@ -92,12 +91,13 @@ func handleConn(conn net.Conn, distributorCh chan Order) {
 			return
 		}
 		o := Order{
-			orderId:     in.orderId,
-			price:       in.price,
-			count:       in.count,
-			executionId: 0,
-			instrument:  in.instrument,
-			done:        done,
+			orderId:       in.orderId,
+			price:         in.price,
+			count:         in.count,
+			executionId:   0,
+			instrument:    in.instrument,
+			done:          done,
+			insertRequest: false,
 		}
 		switch in.orderType {
 		case inputBuy:

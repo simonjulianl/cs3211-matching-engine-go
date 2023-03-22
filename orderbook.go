@@ -5,14 +5,15 @@ import (
 )
 
 type Order struct {
-	price       uint32
-	timestamp   int64
-	count       uint32
-	orderId     uint32
-	executionId uint32
-	input       inputType
-	instrument  string
-	done        chan<- struct{} // to mark that the current order has been processed and the client thread can send more orders
+	price         uint32
+	timestamp     int64
+	count         uint32
+	orderId       uint32
+	executionId   uint32
+	input         inputType
+	instrument    string
+	done          chan<- struct{} // to mark that the current order has been processed and the client thread can send more orders
+	insertRequest bool            // if the Order just ask to be inserted, not to be matched
 }
 
 func (o *Order) printOrder() {

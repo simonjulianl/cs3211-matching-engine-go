@@ -1,42 +1,102 @@
 package main
 
 import (
-	"container/heap"
 	"context"
 )
 
 type Worker struct {
-	inputCh        <-chan Order
-	deletionCh     chan<- uint32
-	buyOrderbook   *Orderbook
-	sellOrderbook  *Orderbook
-	orderIdMapping map[uint32]*Order
+	inputCh            <-chan Order
+	buyOutputCh        chan<- Order
+	buyDone            chan struct{}
+	currentBuy         *Order // buy worker handles sell order
+	sellOutputCh       chan<- Order
+	sellDone           chan struct{}
+	currentSell        *Order // sell worker handles buy order
+	deletionWorkerCh   <-chan uint32
+	orderIdTypeMapping map[uint32]inputType
 }
 
-func getWorker(inputCh <-chan Order, deletionCh chan<- uint32) *Worker {
-	return &Worker{
-		inputCh:        inputCh,
-		deletionCh:     deletionCh,
-		buyOrderbook:   getBuyOrderbook(),
-		sellOrderbook:  getSellOrderbook(),
-		orderIdMapping: make(map[uint32]*Order),
+func initWorker(ctx context.Context, inputCh <-chan Order, deletionCh chan<- uint32) {
+	buyCh := make(chan Order)
+	buyDone := make(chan struct{}, 1)
+	buyDone <- struct{}{}
+
+	sellCh := make(chan Order)
+	sellDone := make(chan struct{}, 1)
+	sellDone <- struct{}{}
+
+	deletionWorkerCh := make(chan uint32, WorkerBufferSize)
+
+	w := &Worker{
+		inputCh:            inputCh,
+		buyOutputCh:        buyCh,
+		buyDone:            buyDone,
+		currentBuy:         nil,
+		sellOutputCh:       sellCh,
+		sellDone:           sellDone,
+		currentSell:        nil,
+		deletionWorkerCh:   deletionWorkerCh,
+		orderIdTypeMapping: make(map[uint32]inputType),
 	}
+
+	bw := &BuyWorker{
+		inputCh:               buyCh,
+		sellOutputCh:          sellCh,
+		deletionDistributorCh: deletionCh,
+		deletionWorkerCh:      deletionWorkerCh,
+		done:                  buyDone,
+		sellOrderbook:         getSellOrderbook(),
+		orderIdMapping:        make(map[uint32]*Order),
+	}
+
+	sw := &SellWorker{
+		inputCh:               sellCh,
+		buyOutputCh:           buyCh,
+		deletionDistributorCh: deletionCh,
+		deletionWorkerCh:      deletionWorkerCh,
+		done:                  sellDone,
+		buyOrderbook:          getBuyOrderbook(),
+		orderIdMapping:        make(map[uint32]*Order),
+	}
+
+	go bw.work(ctx)
+	go sw.work(ctx)
+	go w.work(ctx)
 }
 func (w *Worker) work(ctx context.Context) {
 	for {
 		select {
+		case id := <-w.deletionWorkerCh:
+			delete(w.orderIdTypeMapping, id)
 		case o := <-w.inputCh:
 			switch o.input {
 			case inputCancel:
+				/*
+					Realize that you cannot have concurrent delete and (buy/sell). This is because it is guaranteed that
+					the deletion comes from the same thread which must wait until the current order to be finished.
+				*/
 				w.handleCancel(o)
 			case inputBuy:
-				w.handleBuy(o)
+				<-w.sellDone
+				<-w.buyDone // no one is buying
+				w.currentBuy = &o
+				w.handleSafeBuy(o)
+				<-w.buyDone // ensure that the processing is done
+				w.currentBuy = nil
+				w.buyDone <- struct{}{}
+				w.sellDone <- struct{}{}
 			case inputSell:
-				w.handleSell(o)
+				<-w.buyDone
+				<-w.sellDone // no one in selling
+				w.currentSell = &o
+				w.handleSafeSell(o)
+				<-w.sellDone // ensure that the sell has been done
+				w.currentSell = nil
+				w.sellDone <- struct{}{}
+				w.buyDone <- struct{}{}
 			default: // not recognized input type
 				o.printOrder()
 			}
-			o.done <- struct{}{}
 		case <-ctx.Done():
 			return
 		}
@@ -44,105 +104,59 @@ func (w *Worker) work(ctx context.Context) {
 }
 
 func (w *Worker) handleCancel(o Order) {
-	w.deletionCh <- o.orderId
-	if val, ok := w.orderIdMapping[o.orderId]; ok {
-		val.count = 0
-		outputOrderDeleted(o, true, GetCurrentTimestamp())
-		delete(w.orderIdMapping, o.orderId)
-	} else {
+	if val, ok := w.orderIdTypeMapping[o.orderId]; ok {
+		delete(w.orderIdTypeMapping, o.orderId)
+		if val == inputBuy {
+			<-w.buyDone
+			w.buyOutputCh <- o
+		} else {
+			// sell
+			<-w.sellDone
+			w.sellOutputCh <- o
+		}
+	} else { // already deleted, not in buy or sell anymore
 		outputOrderDeleted(o, false, GetCurrentTimestamp())
+		o.done <- struct{}{}
 	}
 }
 
-func (w *Worker) isOrderMatching(buyPrice uint32, sellPrice uint32) bool {
+func (w *Worker) handleSafeBuy(o Order) {
+	w.orderIdTypeMapping[o.orderId] = inputSell // buy order will be put in buy orderbook in sell worker
+	if w.currentSell == nil {
+		// we can immediately send the order
+		w.buyOutputCh <- o
+	} else {
+		// the current sell is not nil, we need to check if we can
+		if isOrderMatching(o.price, w.currentSell.price) {
+			<-w.sellDone // wait until the sell is done
+			w.buyOutputCh <- o
+			w.sellDone <- struct{}{} // release the sell worker, allow it to work again
+		} else { // order not matching, no harm in sending directly
+			w.buyOutputCh <- o
+		}
+	}
+}
+func (w *Worker) handleSafeSell(o Order) {
+	w.orderIdTypeMapping[o.orderId] = inputBuy // sell order will be put in sell orderbook in buy worker
+	if w.currentBuy == nil {
+		// we can immediately send the order
+		w.sellOutputCh <- o
+	} else {
+		// the current sell is not nil, we need to check if we can
+		if isOrderMatching(w.currentBuy.price, o.price) {
+			<-w.buyDone // wait until the buy is done
+			w.sellOutputCh <- o
+			w.buyDone <- struct{}{} // release the buy worker, allow it to work again
+		} else { // order not matching, no harm in sending directly
+			w.sellOutputCh <- o
+		}
+	}
+}
+
+// ========= UTILITY =================
+func isOrderMatching(buyPrice uint32, sellPrice uint32) bool {
 	return buyPrice >= sellPrice
 }
-func (w *Worker) handleBuy(o Order) {
-	for w.sellOrderbook.Len() > 0 && o.count > 0 {
-		topSellOrder := w.sellOrderbook.Top()
-		if topSellOrder.count == 0 {
-			heap.Pop(w.sellOrderbook) // deleted order
-			continue
-		}
-
-		if w.isOrderMatching(o.price, topSellOrder.price) {
-			qtyMatching := min(o.count, topSellOrder.count)
-			o.count -= qtyMatching
-			topSellOrder.count -= qtyMatching
-			topSellOrder.executionId += 1
-
-			outputOrderExecuted(
-				topSellOrder.orderId,
-				o.orderId,
-				topSellOrder.executionId,
-				topSellOrder.price,
-				qtyMatching,
-				GetCurrentTimestamp(),
-			)
-
-			if topSellOrder.count == 0 {
-				delete(w.orderIdMapping, topSellOrder.orderId)
-				w.deletionCh <- topSellOrder.orderId
-				heap.Pop(w.sellOrderbook)
-			}
-		} else {
-			break
-		}
-	}
-
-	if o.count > 0 {
-		refO := &o
-		refO.timestamp = GetCurrentTimestamp()
-
-		w.orderIdMapping[refO.orderId] = refO
-		heap.Push(w.buyOrderbook, refO)
-		outputOrderAdded(o, refO.timestamp)
-	}
-}
-
-func (w *Worker) handleSell(o Order) {
-	for w.buyOrderbook.Len() > 0 && o.count > 0 {
-		topBuyOrder := w.buyOrderbook.Top()
-		if topBuyOrder.count == 0 {
-			heap.Pop(w.buyOrderbook) // deleted order
-			continue
-		}
-
-		if w.isOrderMatching(topBuyOrder.price, o.price) {
-			qtyMatching := min(o.count, topBuyOrder.count)
-			o.count -= qtyMatching
-			topBuyOrder.count -= qtyMatching
-			topBuyOrder.executionId += 1
-
-			outputOrderExecuted(
-				topBuyOrder.orderId,
-				o.orderId,
-				topBuyOrder.executionId,
-				topBuyOrder.price,
-				qtyMatching,
-				GetCurrentTimestamp(),
-			)
-
-			if topBuyOrder.count == 0 {
-				delete(w.orderIdMapping, topBuyOrder.orderId)
-				w.deletionCh <- topBuyOrder.orderId
-				heap.Pop(w.buyOrderbook)
-			}
-		} else {
-			break
-		}
-	}
-
-	if o.count > 0 {
-		refO := &o
-		refO.timestamp = GetCurrentTimestamp()
-
-		w.orderIdMapping[refO.orderId] = refO
-		heap.Push(w.sellOrderbook, refO)
-		outputOrderAdded(o, refO.timestamp)
-	}
-}
-
 func min(a uint32, b uint32) uint32 {
 	if a > b {
 		return b
