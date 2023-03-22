@@ -78,24 +78,23 @@ func (w *Worker) work(ctx context.Context) {
 				*/
 				w.handleCancel(o)
 			case inputBuy:
+				<-w.buyDone // no one is buying
 				select {
 				case <-w.sellDone:
 					w.currentSell = nil
 					w.sellDone <- struct{}{}
 				default:
 				}
-				<-w.buyDone // no one is buying
 				w.currentBuy = &o
 				w.handleSafeBuy(o)
 			case inputSell:
+				<-w.sellDone // no one in selling
 				select {
 				case <-w.buyDone:
 					w.currentBuy = nil
 					w.buyDone <- struct{}{}
 				default:
 				}
-
-				<-w.sellDone // no one in selling
 				w.currentSell = &o
 				w.handleSafeSell(o)
 			default: // not recognized input type
