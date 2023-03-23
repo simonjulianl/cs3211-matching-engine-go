@@ -13,61 +13,14 @@ import (
 const WorkerBufferSize = 100
 
 type Engine struct {
-	clientCh          chan Order
-	deletionCh        chan uint32
-	instrumentMapping map[string]chan<- Order
-	idMapping         map[uint32]string
+	distributorCh chan<- Order
 }
 
 func getInitEngine(ctx context.Context) *Engine {
-	e := &Engine{
-		clientCh:          make(chan Order),
-		deletionCh:        make(chan uint32, WorkerBufferSize),
-		instrumentMapping: make(map[string]chan<- Order),
-		idMapping:         make(map[uint32]string),
-	}
-
-	go e.createDistributor(ctx)
+	distributorChannel := make(chan Order, WorkerBufferSize)
+	e := &Engine{distributorCh: distributorChannel}
+	initDistributor(distributorChannel, ctx)
 	return e
-}
-func (e *Engine) createDistributor(ctx context.Context) {
-	for {
-		select {
-		case id := <-e.deletionCh:
-			delete(e.idMapping, id)
-		case o := <-e.clientCh:
-			if o.instrument == "" { // cancel order
-				if val, ok := e.idMapping[o.orderId]; ok {
-					o.instrument = val
-				} else {
-					outputOrderDeleted(o, false, GetCurrentTimestamp())
-					o.done <- struct{}{}
-					break
-				}
-			}
-
-			if o.input != inputCancel {
-				e.idMapping[o.orderId] = o.instrument
-			}
-
-			if val, ok := e.instrumentMapping[o.instrument]; !ok {
-				e.createWorkerAndSend(ctx, o)
-			} else {
-				val <- o
-			}
-		case <-ctx.Done():
-			return
-		}
-	}
-}
-
-func (e *Engine) createWorkerAndSend(ctx context.Context, o Order) {
-	instCh := make(chan Order, WorkerBufferSize)
-	e.instrumentMapping[o.instrument] = instCh
-
-	// create the worker per instrument
-	initWorker(ctx, instCh, e.deletionCh)
-	instCh <- o
 }
 
 func (e *Engine) accept(ctx context.Context, conn net.Conn) {
@@ -75,11 +28,11 @@ func (e *Engine) accept(ctx context.Context, conn net.Conn) {
 		<-ctx.Done()
 		conn.Close()
 	}()
-	go handleConn(conn, e.clientCh)
+	go handleConn(conn, e.distributorCh)
 }
 
 // client connection
-func handleConn(conn net.Conn, distributorCh chan Order) {
+func handleConn(conn net.Conn, distributorCh chan<- Order) {
 	defer conn.Close()
 	done := make(chan struct{})
 	for {
